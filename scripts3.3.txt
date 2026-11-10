@@ -1,0 +1,63 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]; then
+  echo "Ejecuta este script como root (sudo)."
+  exit 1
+fi
+
+echo "=== 1. Creando dos discos duros virtuales ==="
+dd if=/dev/zero of=/disco1.img bs=1M count=100 2>/dev/null
+dd if=/dev/zero of=/disco2.img bs=1M count=100 2>/dev/null
+
+LOOP1=$(losetup -f)
+losetup $LOOP1 /disco1.img
+LOOP2=$(losetup -f)
+losetup $LOOP2 /disco2.img
+
+echo "=== 2. Construyendo Arreglo RAID 1 (Espejo) ==="
+yes | mdadm --create /dev/md0 --level=1 --raid-devices=2 $LOOP1 $LOOP2 2>/dev/null
+mkfs.ext4 /dev/md0 >/dev/null 2>&1
+mkdir -p /mnt/nas_empresa
+mount /dev/md0 /mnt/nas_empresa
+chmod 777 /mnt/nas_empresa
+
+echo "=== 3. Compartiendo en red con Samba ==="
+sed -i '/\[NAS_Empresa\]/,+4d' /etc/samba/smb.conf 
+echo -e "\n[NAS_Empresa]\npath = /mnt/nas_empresa\nread only = no\nguest ok = yes" >> /etc/samba/smb.conf
+systemctl restart smbd
+
+echo "[OK] RAID 1 creado y publicado."
+
+#!/bin/bash
+if [ "$EUID" -ne 0 ]; then
+  echo "Ejecuta este script como root (sudo)."
+  exit 1
+fi
+
+echo "=== Levantando Servidor de Impresión (CUPS) ==="
+systemctl start cups
+
+echo "=== Instalando Impresora Virtual ==="
+lpadmin -p Impresora_Oficina -E -v cups-pdf:/ -m lsb/usr/cups-pdf/CUPS-PDF_opt.ppd
+lpoptions -d Impresora_Oficina
+cupsaccept Impresora_Oficina
+cupsenable Impresora_Oficina
+
+echo "[OK] Impresora lista."
+
+#!/bin/bash
+if [ "$EUID" -ne 0 ]; then
+  echo "Ejecuta este script como root (sudo)."
+  exit 1
+fi
+
+LOOP1=$(losetup -j /disco1.img | cut -d: -f1)
+
+echo "=== 1. Destruyendo físicamente el Disco 1 ==="
+mdadm --manage /dev/md0 --fail $LOOP1
+mdadm --detail /dev/md0 | grep -E "State :|Active Devices|Failed Devices"
+
+echo "=== 2. Extrayendo disco roto y metiendo repuesto ==="
+mdadm --manage /dev/md0 --remove $LOOP1
+mdadm --manage /dev/md0 --add $LOOP1
+
+echo "[OK] Reconstrucción iniciada. Revisa con: mdadm --detail /dev/md0"
